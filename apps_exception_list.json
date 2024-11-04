@@ -1,0 +1,6 @@
+{ 
+  "exception_list_apps_url":[
+    "https://sample1-1234567890.aws.databricksapps.com",
+    "https://sample2-0987654321.aws.databricksapps.com"
+  ]
+}
