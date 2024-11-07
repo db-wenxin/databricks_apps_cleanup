@@ -26,6 +26,14 @@ def delete_app(client, app):
     except Exception as e:
         print(f"Error deleting app {app.name}: {e}")
 
+def stop_app(client, app):
+    """Stop the given app."""
+    try:
+        client.apps.stop(app.name)
+        print(f"Stopped app with ID: {app.name}")
+    except Exception as e:
+        print(f"Error stopping app {app.name}: {e}")
+
 def is_exception(app, exception_list):
     """Check if the app URL is in the exception list."""
     return app.url in exception_list
@@ -43,10 +51,14 @@ def delete_old_apps(client, max_app_age, enable_delete, exception_list):
             app_age = (datetime.now() - create_time).days
             print(app.url)
             print(f"App {app.name} was created {app_age} days ago.")
-            # Delete app if it's older than max_app_age and not in exception list
-            if app_age >= max_app_age and not is_exception(app, exception_list) and enable_delete:
-                print(f"Deleting app: {app.name} older than {max_app_age} days.")
-                delete_app(client=client, app=app)
+            # Check if app is older than max_app_age and not in exception list
+            if app_age >= max_app_age and not is_exception(app, exception_list):
+                if enable_delete:
+                    print(f"Deleting app: {app.name} older than {max_app_age} days.")
+                    delete_app(client=client, app=app)
+                else:
+                    print(f"Stopping app: {app.name} older than {max_app_age} days.")
+                    stop_app(client=client, app=app)
             else:
                 print(f"Skipping app: {app.name}. (age: {app_age} days)")
 
@@ -57,7 +69,7 @@ def main():
                         help="JSON file with exception list for long running Apps",
                         default='apps_exception.json', required=False)
     parser.add_argument('-d', '--enable_delete', action='store_true',
-                        help="Enable deletion if set. Else it will just print values.",
+                        help="Enable deletion if set. Else it will stop apps.",
                         default=False, required=False)
     parser.add_argument('-a', '--max_app_age', type=int,
                         help="Maximum age of apps to delete in days",
@@ -69,7 +81,7 @@ def main():
     exception_file = args.exception_file
 
     if not enable_delete:
-        print("Deletion Disabled. Set -d to enable deletion.")
+        print(f"Deletion Disabled. Apps older than {max_app_age} days and not in the exception list will be stopped. Set -d to enable deletion.")
 
     # Load exception list from the specified JSON file
     exception_config = get_config_json(exception_file)
