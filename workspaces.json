@@ -1,0 +1,12 @@
+[
+    {
+      "name": "Workspace_A_Prod",
+      "endpoint": "https://your-workspace-A.cloud.databricks.com",
+      "application_id": "client_id_for_workspace_A"
+    },
+    {
+      "name": "Workspace_B_Dev",
+      "endpoint": "https://your-workspace-B.cloud.databricks.com",
+      "application_id": "client_id_for_workspace_B"
+    }
+  ]
