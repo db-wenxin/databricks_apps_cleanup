@@ -1,6 +1,14 @@
-{ 
-  "exception_list_apps_url":[
-    "https://sample1-1234567890.aws.databricksapps.com",
-    "https://sample2-0987654321.aws.databricksapps.com"
-  ]
-}
+[
+  {
+      "app_url": "https://example1.aws.databricksapps.com",
+      "expiry": ""
+  },
+  {
+    "app_url": "https://example2.azure.databricksapps.com",
+    "expiry": "2028-05-23"
+  },
+  {
+      "app_url": "https://example3.aws.databricksapps.com",
+      "expiry": "2029-05-23"
+  }
+]

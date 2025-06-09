@@ -1,98 +1,163 @@
-from databricks.sdk import WorkspaceClient
-from datetime import datetime
+# Stops apps if they were created and last updated more than <max_stop_age> days ago.
+# Deletes apps if their last update was more than <max_app_age> days ago and they are already in a stopped state.
+# Skips the apps in the exception list for both operations.
+
 import json
 import argparse
+import sys
+import logging
+from datetime import datetime, timezone
 
-def get_config_json(config_file):
-    """Read and parse JSON config file."""
-    with open(config_file, 'r') as file:
-        config = json.load(file)
-    return config
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.apps import App 
 
-def get_apps(client):
-    """Fetch and return all apps in the workspace."""
+def get_json_file_content(config_file: str):
+    """Load and return the JSON file content."""
     try:
-        all_apps = client.apps.list()
-        return list(all_apps)  # Convert response to a list of apps
+        with open(config_file, 'r') as file:
+            return json.load(file)
     except Exception as e:
-        print(f"Error fetching apps: {e}")
+        logger.error(f"Error reading JSON file {config_file}: {e}")
         return []
 
-def delete_app(client, app):
+def is_expired_exception(exception_entry):
+    """
+    Check if an app exception has expired.
+    Returns (is_expired, app_url)
+    """
+    if not isinstance(exception_entry, dict) or "app_url" not in exception_entry:
+        logger.error(f"Invalid exception entry format: {exception_entry}")
+        return False, None
+    
+    app_url = exception_entry["app_url"]
+    
+    if "expiry" not in exception_entry:
+        logger.error(f"Missing required 'expiry' field for app_url: {app_url}")
+        return False, app_url
+    
+    # Empty expiry string means never expires
+    if exception_entry["expiry"] == "":
+        return False, app_url
+    
+    # Check if expiry date has passed
+    try:
+        expiry_date = datetime.strptime(exception_entry["expiry"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        current_date = datetime.now(timezone.utc)
+        return current_date >= expiry_date, app_url
+    except ValueError:
+        logger.error(f"Invalid date format for {app_url}: {exception_entry['expiry']}. Use YYYY-MM-DD or empty string.")
+        return False, app_url
+
+def get_apps(client: WorkspaceClient):
+    """Fetch and return all apps in the workspace."""
+    try:
+        return list(client.apps.list())
+    except Exception as e:
+        logger.info(f"Error fetching apps: {e}")
+        return []
+
+def stop_app(client: WorkspaceClient, app: App):
+    """Stop the given app."""
+    try:
+        client.apps.stop_and_wait(app.name)
+        logger.info(f"Stopped app: {app.name}")
+    except Exception as e:
+        logger.error(f"Error stopping app {app.name}: {e}")
+
+def delete_app(client: WorkspaceClient, app: App):
     """Delete the given app."""
     try:
         client.apps.delete(app.name)
-        print(f"Deleted app with ID: {app.name}")
+        logger.info(f"Deleted app: {app.name}")
     except Exception as e:
-        print(f"Error deleting app {app.name}: {e}")
+        logger.error(f"Error deleting app {app.name}: {e}")
 
-def stop_app(client, app):
-    """Stop the given app."""
-    try:
-        client.apps.stop(app.name)
-        print(f"Stopped app with ID: {app.name}")
-    except Exception as e:
-        print(f"Error stopping app {app.name}: {e}")
-
-def is_exception(app, exception_list):
-    """Check if the app URL is in the exception list."""
-    return app.url in exception_list
-
-def delete_old_apps(client, max_app_age, enable_delete, exception_list):
-    """Main function to handle app cleanup."""
+def manage_apps(client: WorkspaceClient, max_stop_age: int, max_app_age: int, app_exceptions_list: list, dry_run: bool):
+    """Manage app lifecycle based on last update time."""
     apps = get_apps(client=client)
-    print(f"Found {len(apps)} apps.")
+    logger.info(f"Found {len(apps)} apps.")
+
+    # Process app exception list
+    active_exceptions = {}
+    expired_exceptions = []
+    
+    for entry in app_exceptions_list:
+        is_expired, app_url = is_expired_exception(entry)
+        if app_url:
+            if is_expired:
+                expired_exceptions.append(app_url)
+                logger.info(f"Exception for app {app_url} has expired")
+            else:
+                active_exceptions[app_url] = True
+    
+    if expired_exceptions:
+        logger.info(f"Found {len(expired_exceptions)} expired app exceptions: {', '.join(expired_exceptions)}")
 
     if apps:
         for app in apps:
-            print("\n")
-            # Calculate the age of the app in days
-            create_time = datetime.strptime(app.create_time, "%Y-%m-%dT%H:%M:%SZ")
+            if app.url in active_exceptions:
+                logger.info(f"This App {app.url} is in the active exception list..Skipping exception app: {app.name}")
+                continue
+            try:
+                create_time = datetime.strptime(app.create_time, "%Y-%m-%dT%H:%M:%SZ")
+                update_time = datetime.strptime(app.update_time, "%Y-%m-%dT%H:%M:%SZ")
+            except Exception as e:
+                logger.error(f"Error parsing times for app {app.name}: {e}")
+                continue
+            
             app_age = (datetime.now() - create_time).days
-            print(app.url)
-            print(f"App {app.name} was created {app_age} days ago.")
-            # Check if app is older than max_app_age and not in exception list
-            if app_age >= max_app_age and not is_exception(app, exception_list):
-                if enable_delete:
-                    print(f"Deleting app: {app.name} older than {max_app_age} days.")
-                    delete_app(client=client, app=app)
-                else:
-                    print(f"Stopping app: {app.name} older than {max_app_age} days.")
-                    stop_app(client=client, app=app)
-            else:
-                print(f"Skipping app: {app.name}. (age: {app_age} days)")
+            update_age = (datetime.now() - update_time).days
+            logger.info(f"App {app.name};  URL: {app.url} was created {app_age} days ago and last updated {update_age} days ago.")
+
+            # Stop apps that are active and haven't been updated in more than `max_stop_age` days
+            if str(app.compute_status.state) == 'ComputeState.ACTIVE' and update_age >= max_stop_age:
+                logger.info(f"Stopping app: {app.name} (last updated {update_age} days ago).")
+                if not dry_run:
+                    stop_app(client, app)
+                continue  # Move to the next app after attempting stop
+            
+            # Delete apps that are stopped and haven't been updated in more than `max_app_age` days
+            if str(app.compute_status.state) == 'ComputeState.STOPPED' and update_age >= max_app_age:
+                logger.info(f"Deleting app: {app.name} (last updated {update_age} days ago).")
+                if not dry_run:
+                    delete_app(client, app)
+                continue
+            # Skip other apps
+            logger.info(f"Skipping app {app.name}. (State: {app.compute_status.state}, Created {app_age} days ago, Last updated {update_age} days ago).")
 
 def main():
-    """Parse arguments and initiate the app cleanup process."""
-    parser = argparse.ArgumentParser(description="Delete old Databricks Apps")
-    parser.add_argument('-e', '--exception_file', type=str,
-                        help="JSON file with exception list for long running Apps",
-                        default='apps_exception.json', required=False)
-    parser.add_argument('-d', '--enable_delete', action='store_true',
-                        help="Enable deletion if set. Else it will stop apps.",
-                        default=False, required=False)
-    parser.add_argument('-a', '--max_app_age', type=int,
-                        help="Maximum age of apps to delete in days",
-                        default=7, required=False)
+    global logger
+    logger = logging.getLogger(__name__)
+    # Configure logger to write to stdout --- stream spark error log to script standard output.
+    handler = logging.StreamHandler(sys.stdout)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    local_dbutils = WorkspaceClient().dbutils
+    
+    parser = argparse.ArgumentParser(description="Manage old Databricks Apps")
+    parser.add_argument('-a', '--max_app_age', type=int, default=7, help="Maximum age of apps to delete in days")
+    parser.add_argument('-s', '--max_age_before_stop', type=int, default=3, help="Maximum age of apps before stop in days")
+    parser.add_argument('-d', '--dry_run', action='store_true', help="Enable dry run mode. If omitted, deletions will be performed.")
+    parser.add_argument('-c', '--config_file_workspace', type=str, required=True, help="JSON file with workspace configurations")
+    parser.add_argument('-e', '--except_apps_file', type=str, required=True, help="JSON file with app names to skip")
+    parser.add_argument('--databricks_secret_scope_name', type=str, default="<please_provide_the_secret_scope_name>")
     args = parser.parse_args()
 
-    enable_delete = args.enable_delete
-    max_app_age = args.max_app_age
-    exception_file = args.exception_file
+    client_configs = get_json_file_content(args.config_file_workspace)
+    app_exceptions_list = get_json_file_content(args.except_apps_file)
 
-    if not enable_delete:
-        print(f"Deletion Disabled. Apps older than {max_app_age} days and not in the exception list will be stopped. Set -d to enable deletion.")
+    for config in client_configs:
+        logger.info(f"---- Databricks Apps Cleanup in {config['name']} ----\n")
 
-    # Load exception list from the specified JSON file
-    exception_config = get_config_json(exception_file)
-    exception_list = exception_config.get("exception_list_apps_url", [])
-
-    # Create a Databricks Workspace client (update with your configs if needed)
-    client = WorkspaceClient()
-
-    # Perform app cleanup
-    delete_old_apps(client=client, max_app_age=max_app_age,
-                    enable_delete=enable_delete, exception_list=exception_list)
+        # if 'gcp.databricks.com' in config['endpoint']:  # Apps are not available in GCP
+        #     continue
+        ws_client = WorkspaceClient(host=config['endpoint'],
+                                   client_id=config['application_id'],
+                                   client_secret=local_dbutils.secrets.get(scope=args.databricks_secret_scope_name, key=config['application_id'])
+                                   )
+        secret_principal = ws_client.current_user.me()
+        logger.info(f"Running Apps clean up script as {secret_principal.display_name}; dry_run status: {args.dry_run} \n")
+        manage_apps(ws_client, args.max_age_before_stop, args.max_app_age, app_exceptions_list, args.dry_run)
 
 if __name__ == "__main__":
     main()
